@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Force-Directed Graph</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            margin: 20px 0;
+            color: #333;
+        }
+        .tooltip {
+            position: absolute;
+            background-color: rgba(255, 255, 255, 0.9);
+            color: black;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            box-shadow: 0px 2px 6px rgba(0, 0, 0, 0.2);
+        }
+        svg {
+            font-family: Arial, sans-serif;
+            width: 100%;
+            height: 100vh;
+            display: block;
+        }
+        .highlighted {
+            stroke: red;
+            stroke-width: 3px;
+        }
+        .same-region {
+            fill: lightblue !important;
+        }
+        .highlighted-link {
+            stroke: green;
+            stroke-width: 2px;
+        }
+        select, input {
+            margin: 10px;
+            padding: 5px;
+            font-size: 16px;
+        }
+        .controls {
+            margin: 10px 0;
+        }
+        .legend {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: center;
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+        }
+        .legend-item {
+            margin: 5px 0;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .legend-item span {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Force-Directed Graph</h1>
+    <div class="controls">
+        <label for="regionFilter">Filter by Region: </label>
+        <select id="regionFilter">
+            <option value="all">All Regions</option>
+        </select>
+        <label for="sortOption">Sort by: </label>
+        <select id="sortOption">
+            <option value="completion_rate">Completion Rate</option>
+            <option value="failure_rate">Failure Rate</option>
+        </select>
+        <label for="nodeSize">Node Size: </label>
+        <input type="range" id="nodeSize" min="5" max="20" value="10">
+        <label for="linkThickness">Link Thickness: </label>
+        <input type="range" id="linkThickness" min="1" max="5" value="2">
+        <button id="exportButton">Export as SVG</button>
+    </div>
+    <div id="tooltip" class="tooltip"></div>
+    <svg></svg>
+
+    <div class="legend">
+        <div class="legend-item" id="legendCompletionRate">
+            <span style="background-color: #ff7f0e;"></span> Completion Rate
+        </div>
+        <div class="legend-item" id="legendFailureRate">
+            <span style="background-color: #1f77b4;"></span> Failure Rate
+        </div>
+    </div>
+
+    <script>
+        const svg = d3.select("svg");
+        const tooltip = d3.select("#tooltip");
+
+        // Set initial SVG width and height based on the viewport
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        svg
+            .attr("width", width)
+            .attr("height", height);
+
+        // Create a group element to hold the graph
+        const graphGroup = svg.append("g");
+
+        // Apply zoom behavior
+        const zoom = d3.zoom()
+            .scaleExtent([0.5, 5])  // Min and max zoom scale
+            .on("zoom", (event) => {
+                graphGroup.attr("transform", event.transform);  // Apply transformation (scale/translate)
+            });
+
+        svg.call(zoom);
+
+        d3.csv("processed_data.csv").then(data => {
+            console.log("Raw Data:", data);
+
+            // Parse and prepare data
+            data.forEach(d => {
+                d.new_sp_coh = +d.new_sp_coh || 1;
+                d.completion_rate = +d.completion_rate || 0;
+                d.failure_rate = +d.failure_rate || 0;
+            });
+
+            // Group countries by region
+            const regions = d3.group(data, d => d.region_code);
+            const regionNames = Array.from(regions.keys());
+
+            // Add regions to filter dropdown
+            const regionFilter = d3.select("#regionFilter");
+            regionNames.forEach(region => {
+                regionFilter.append("option").attr("value", region).text(region);
+            });
+
+            // Prepare nodes and links
+            let nodes = [];
+            let links = [];
+
+            regions.forEach((countries, region) => {
+                countries.forEach((country, i) => {
+                    // Create nodes for each country
+                    nodes.push({
+                        id: country.country,
+                        region: region,
+                        completion_rate: country.completion_rate,
+                        failure_rate: country.failure_rate
+                    });
+
+                    // Create links between countries in the same region
+                    if (i > 0) {
+                        links.push({
+                            source: countries[i - 1].country,
+                            target: country.country,
+                            completion_rate: country.completion_rate,
+                            failure_rate: country.failure_rate
+                        });
+                    }
+                });
+            });
+
+            // Initial render of the graph
+            renderGraph(nodes, links);
+
+            // Function to update the graph based on filter and sort
+            function updateGraph(filteredNodes, filteredLinks) {
+                graphGroup.selectAll("*").remove(); // Clear existing graph
+                renderGraph(filteredNodes, filteredLinks); // Re-render graph with updated data
+            }
+
+            // Render graph with given nodes and links
+            function renderGraph(nodes, links) {
+                // Create a simulation with slight expansion
+                const simulation = d3.forceSimulation(nodes)
+                    .force("link", d3.forceLink(links).id(d => d.id).distance(120))
+                    .force("charge", d3.forceManyBody().strength(-150))
+                    .force("collide", d3.forceCollide(20))
+                    .force("center", d3.forceCenter(width / 2, height / 2))
+                    .alphaDecay(0.05)
+                    .on("tick", ticked);
+
+                // Create link elements
+                const link = graphGroup.selectAll("line")
+                    .data(links)
+                    .join("line")
+                    .attr("stroke-width", (d) => document.getElementById("linkThickness").value)
+                    .attr("stroke", d => d3.interpolateBlues(d.completion_rate));
+
+                // Create node elements
+                const node = graphGroup.selectAll("circle")
+                    .data(nodes)
+                    .join("circle")
+                    .attr("r", document.getElementById("nodeSize").value)
+                    .attr("fill", d => d3.interpolateOranges(d.completion_rate))
+                    .attr("stroke", "black")
+                    .call(d3.drag()
+                        .on("start", dragStarted)
+                        .on("drag", dragged)
+                        .on("end", dragEnded));
+
+                // Tooltip interactivity
+                node.on("mouseover", (event, d) => {
+                    tooltip.style("opacity", 1)
+                        .style("left", `${event.pageX + 10}px`)
+                        .style("top", `${event.pageY + 10}px`)
+                        .html(
+                            `<strong>Country:</strong> ${d.id}<br>
+                            <strong>Region:</strong> ${d.region}<br>
+                            <strong>Completion Rate:</strong> ${d.completion_rate.toFixed(2)}<br>
+                            <strong>Failure Rate:</strong> ${d.failure_rate.toFixed(2)}`
+                        );
+                }).on("mouseout", () => {
+                    tooltip.style("opacity", 0);
+                });
+
+                // On-click action
+                node.on("click", (event, d) => {
+                    // Highlight the clicked node
+                    node.classed("highlighted", false);
+                    link.classed("highlighted-link", false);
+                    d3.select(event.currentTarget).classed("highlighted", true);
+
+                    // Highlight all links of the selected country
+                    link.filter(l => l.source.id === d.id || l.target.id === d.id)
+                        .classed("highlighted-link", true);
+                });
+
+                function ticked() {
+                    link
+                        .attr("x1", d => d.source.x)
+                        .attr("y1", d => d.source.y)
+                        .attr("x2", d => d.target.x)
+                        .attr("y2", d => d.target.y);
+
+                    node
+                        .attr("cx", d => d.x)
+                        .attr("cy", d => d.y);
+                }
+
+                // Drag functions
+                function dragStarted(event) {
+                    if (!event.active) simulation.alphaTarget(0.3).restart();
+                    event.subject.fx = event.subject.x;
+                    event.subject.fy = event.subject.y;
+                }
+
+                function dragged(event) {
+                    event.subject.fx = event.x;
+                    event.subject.fy = event.y;
+                }
+
+                function dragEnded(event) {
+                    if (!event.active) simulation.alphaTarget(0);
+                    event.subject.fx = null;
+                    event.subject.fy = null;
+                }
+            }
+
+            // Event listeners for controls
+            document.getElementById("regionFilter").addEventListener("change", function () {
+                const selectedRegion = this.value;
+                const filteredNodes = nodes.filter(d => selectedRegion === "all" || d.region === selectedRegion);
+                const filteredLinks = links.filter(l => filteredNodes.some(d => d.id === l.source.id || d.id === l.target.id));
+                updateGraph(filteredNodes, filteredLinks);
+            });
+
+            document.getElementById("sortOption").addEventListener("change", function () {
+                const sortOption = this.value;
+                const sortedNodes = [...nodes].sort((a, b) => b[sortOption] - a[sortOption]);
+                const sortedLinks = links.filter(l => sortedNodes.some(d => d.id === l.source.id || d.id === l.target.id));
+                updateGraph(sortedNodes, sortedLinks);
+            });
+
+            document.getElementById("nodeSize").addEventListener("input", function () {
+                const nodeSize = +this.value;
+                svg.selectAll("circle").attr("r", nodeSize);
+            });
+
+            document.getElementById("linkThickness").addEventListener("input", function () {
+                const linkThickness = +this.value;
+                svg.selectAll("line").attr("stroke-width", linkThickness);
+            });
+
+            // Export button logic
+            document.getElementById("exportButton").addEventListener("click", () => {
+                const svgElement = svg.node();
+                const serializer = new XMLSerializer();
+                const source = serializer.serializeToString(svgElement);
+                const dataUrl = "data:image/svg+xml;base64," + btoa(source);
+
+                const a = document.createElement("a");
+                a.href = dataUrl;
+                a.download = "graph.svg";
+                a.click();
+            });
+        });
+    </script>
+</body>
+</html>

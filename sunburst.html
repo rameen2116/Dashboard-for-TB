@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Sunburst Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        .tooltip {
+            position: absolute;
+            background-color: white;
+            border: 1px solid black;
+            padding: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+        }
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            margin: 20px;
+        }
+        .legend-item {
+            margin: 5px 10px;
+            cursor: pointer;
+        }
+        svg text {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Enhanced Sunburst Chart</h1>
+    <div id="tooltip" class="tooltip"></div>
+    <svg width="500" height="500"></svg>
+    <div class="legend"></div>
+    <button id="download">Download Chart</button>
+
+    <script>
+        const width = 1000;
+        const height = 1000;
+        const radius = Math.min(width, height) / 2;
+
+        const svg = d3.select("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .append("g")
+            .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+        const tooltip = d3.select("#tooltip");
+        const legendContainer = d3.select(".legend");
+
+        d3.csv("processed_data.csv").then(data => {
+            // Parse and preprocess data
+            data.forEach(d => {
+                d.new_sp_coh = +d.new_sp_coh || 1; // Default cohort size
+                d.completion_rate = +d.completion_rate || 0;
+                d.failure_rate = +d.failure_rate || 0;
+            });
+
+            // Create a nested hierarchy
+            const nestedData = d3.rollup(
+                data,
+                v => v,
+                d => d.region_code, // Group by region
+                d => d.country      // Group by country within region
+            );
+
+            const hierarchyData = {
+                name: "root",
+                children: Array.from(nestedData, ([region, countries]) => ({
+                    name: region,
+                    children: Array.from(countries, ([country, values]) => ({
+                        name: country,
+                        value: d3.sum(values, d => d.new_sp_coh),
+                        completion_rate: d3.mean(values, d => d.completion_rate),
+                        failure_rate: d3.mean(values, d => d.failure_rate)
+                    }))
+                }))
+            };
+
+            const root = d3.hierarchy(hierarchyData)
+                .sum(d => d.value)
+                .sort((a, b) => b.value - a.value);
+
+            const partition = d3.partition()
+                .size([2 * Math.PI, radius]);
+
+            partition(root);
+
+            const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+            const arc = d3.arc()
+                .startAngle(d => d.x0)
+                .endAngle(d => d.x1)
+                .innerRadius(d => d.y0)
+                .outerRadius(d => d.y1);
+
+            // Create a legend dynamically
+            const legendData = Array.from(new Set(root.descendants()
+                .filter(d => d.depth === 1)
+                .map(d => d.data.name)));
+
+            legendContainer.selectAll(".legend-item")
+                .data(legendData)
+                .enter()
+                .append("div")
+                .attr("class", "legend-item")
+                .style("color", d => color(d))
+                .text(d => d)
+                .on("click", (event, d) => {
+                    // Filter visualization by legend item
+                    svg.selectAll("path")
+                        .attr("opacity", n => n.data.name === d || n.depth === 0 ? 1 : 0.2);
+                });
+
+            // Draw the sunburst chart
+            svg.selectAll("path")
+                .data(root.descendants())
+                .join("path")
+                .attr("d", arc)
+                .attr("fill", d => {
+                    if (d.depth === 1) return color(d.data.name); // Region color
+                    if (d.depth === 2) return color(d.parent.data.name); // Country inherits parent's color
+                    return "white"; // Root color
+                })
+                .attr("stroke", "white")
+                .on("mouseover", (event, d) => {
+                    tooltip.style("opacity", 1)
+                        .style("left", `${event.pageX + 10}px`)
+                        .style("top", `${event.pageY + 10}px`)
+                        .html(`
+                            <strong>${d.depth === 1 ? "Region" : "Country"}:</strong> ${d.data.name || "Unknown"}<br>
+                            <strong>Cohort Size:</strong> ${d.value || 0}<br>
+                            ${d.data.completion_rate ? `<strong>Completion Rate:</strong> ${d.data.completion_rate.toFixed(2)}<br>` : ""}
+                            ${d.data.failure_rate ? `<strong>Failure Rate:</strong> ${d.data.failure_rate.toFixed(2)}<br>` : ""}
+                        `);
+                })
+                .on("mouseout", () => {
+                    tooltip.style("opacity", 0);
+                });
+
+            // Animated transitions for zooming
+            svg.selectAll("path")
+                .on("click", (event, d) => {
+                    svg.transition()
+                        .duration(750)
+                        .tween("scale", () => {
+                            const xd = d3.interpolate(svg.attr("transform"), `translate(${width / 2}, ${height / 2}) scale(${radius / d.y1})`);
+                            return t => svg.attr("transform", xd(t));
+                        });
+                });
+
+            // Download chart as an image
+            d3.select("#download").on("click", () => {
+                const svgData = new XMLSerializer().serializeToString(document.querySelector("svg"));
+                const canvas = document.createElement("canvas");
+                const context = canvas.getContext("2d");
+                const image = new Image();
+                image.onload = () => {
+                    canvas.width = width;
+                    canvas.height = height;
+                    context.drawImage(image, 0, 0);
+                    const a = document.createElement("a");
+                    a.href = canvas.toDataURL("image/png");
+                    a.download = "sunburst_chart.png";
+                    a.click();
+                };
+                image.src = `data:image/svg+xml;base64,${btoa(svgData)}`;
+            });
+        });
+    </script>
+</body>
+</html>

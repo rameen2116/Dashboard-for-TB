@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Timeline Visualization with Animation and Zoom</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        .tooltip {
+            position: absolute;
+            background: #fff;
+            border: 1px solid #aaa;
+            padding: 8px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        .axis-label {
+            font-size: 12px;
+        }
+        .controls {
+            margin-top: 20px;
+        }
+        .filter {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Timeline Visualization with Bounce Animation and Zoom</h1>
+    <svg width="960" height="600"></svg>
+
+    <!-- Play and Pause Controls -->
+    <div class="controls">
+        <button id="playBtn">Play</button>
+        <button id="pauseBtn" disabled>Pause</button>
+    </div>
+
+    <!-- Filter by Region -->
+    <div class="filter">
+        <label for="region_code">Filter by Region:</label>
+        <select id="region_code">
+            <option value="all">All Regions</option>
+            <!-- Region options will be populated dynamically -->
+        </select>
+    </div>
+
+    <script>
+        const margin = { top: 20, right: 30, bottom: 50, left: 50 };
+        const width = 960 - margin.left - margin.right;
+        const height = 600 - margin.top - margin.bottom;
+
+        const svg = d3.select("svg")
+            .attr("viewBox", [0, 0, 960, 600])
+            .append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        const x = d3.scaleTime().range([margin.left, width - margin.right]);
+        const y = d3.scaleLinear().range([height - margin.bottom, margin.top]);
+        const radius = d3.scaleSqrt().range([5, 25]);
+        const color = d3.scaleOrdinal(d3.schemeCategory10);
+
+        // Set up the X-axis with rotated year labels
+        const xAxis = g =>
+            g.attr("transform", `translate(0, ${height - margin.bottom})`)
+                .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)))  // Adjust to tick every year
+                .call(g => g.select(".domain").remove())
+                .selectAll("text")
+                .style("text-anchor", "middle")
+                .attr("transform", "rotate(45)")  // Rotate the labels by 45 degrees
+                .style("font-size", "12px");
+
+        const yAxis = g =>
+            g.attr("transform", `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y))
+                .call(g => g.select(".domain").remove());
+
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip");
+
+        let currentIndex = 0;
+        let interval;
+
+        // Zoom functionality
+        const zoom = d3.zoom()
+            .scaleExtent([1, 10])  // Control zoom limits
+            .translateExtent([[0, 0], [width, height]])  // Control panning limits
+            .on("zoom", zoomed);
+
+        svg.call(zoom);
+
+        d3.csv("processed_data.csv").then(data => {
+            data.forEach(d => {
+                d.year = +d.year;
+                d.completion_rate = +d.completion_rate;
+                d.failure_rate = +d.failure_rate;
+            });
+
+            const years = [...new Set(data.map(d => d.year))];
+            const regions = [...new Set(data.map(d => d.region_code))];  // Corrected to region_code
+
+            // Debugging: Log the regions to ensure they are correctly extracted
+            console.log("Available regions:", regions);
+
+            // Populate the region filter dropdown
+            const regionSelect = d3.select("#region_code");
+            regions.forEach(region => {
+                regionSelect.append("option")
+                    .attr("value", region)
+                    .text(region);
+            });
+
+            // Set domain for time scale (x-axis)
+            x.domain(d3.extent(data, d => new Date(d.year, 0, 1)));
+            y.domain([0, d3.max(data, d => Math.max(d.completion_rate, d.failure_rate))]);
+            radius.domain([0, d3.max(data, d => d.completion_rate)]);
+
+            svg.append("g").call(xAxis);  // Add X-axis with rotated labels
+            svg.append("g").call(yAxis);
+
+            const chart = createChart(data.filter(d => d.year === years[0]));
+
+            function createChart(initialData) {
+                const circles = svg.append("g")
+                    .attr("stroke", "black")
+                    .selectAll("circle")
+                    .data(initialData, d => d.country)
+                    .join("circle")
+                    .attr("cx", d => x(new Date(d.year, 0, 1)))
+                    .attr("cy", d => y(d.completion_rate))
+                    .attr("r", d => radius(d.completion_rate))
+                    .attr("fill", d => color(d.country))
+                    .call(circle => circle.append("title").text(d => `${d.country}\nCompletion Rate: ${d.completion_rate}`))
+                    .on("mouseover", (event, d) => {
+                        tooltip.transition().duration(200).style("opacity", .9);
+                        tooltip.html(`${d.country}<br>Completion Rate: ${d.completion_rate}%<br>Year: ${d.year}`)
+                            .style("left", `${event.pageX + 5}px`)
+                            .style("top", `${event.pageY - 28}px`);
+                    })
+                    .on("mouseout", () => {
+                        tooltip.transition().duration(500).style("opacity", 0);
+                    });
+
+                // Add bounce animation effect
+                circles.transition()
+                    .duration(1000)
+                    .ease(d3.easeBounceOut)  // Apply the bounce effect
+                    .attr("cy", d => y(d.completion_rate))
+                    .attr("r", d => radius(d.completion_rate));
+
+                return Object.assign(svg.node(), {
+                    update(updatedData) {
+                        circles.data(updatedData, d => d.country)
+                            .sort((a, b) => d3.descending(a.completion_rate, b.completion_rate))
+                            .transition()
+                            .duration(1000)
+                            .ease(d3.easeBounceOut)  // Apply bounce effect during update
+                            .attr("cx", d => x(new Date(d.year, 0, 1)))
+                            .attr("cy", d => y(d.completion_rate))
+                            .attr("r", d => radius(d.completion_rate));
+                    }
+                });
+            }
+
+            function startAnimation() {
+                interval = setInterval(() => {
+                    if (currentIndex >= years.length) {
+                        clearInterval(interval);
+                    } else {
+                        const yearData = data.filter(d => d.year === years[currentIndex]);
+                        chart.update(yearData);
+                        currentIndex++;
+                    }
+                }, 1000);
+
+                // Disable Play button and enable Pause button
+                document.getElementById("playBtn").disabled = true;
+                document.getElementById("pauseBtn").disabled = false;
+            }
+
+            function stopAnimation() {
+                clearInterval(interval);
+
+                // Enable Play button and disable Pause button
+                document.getElementById("playBtn").disabled = false;
+                document.getElementById("pauseBtn").disabled = true;
+            }
+
+            // Attach event listeners to Play and Pause buttons
+            document.getElementById("playBtn").addEventListener("click", startAnimation);
+            document.getElementById("pauseBtn").addEventListener("click", stopAnimation);
+
+            // Attach event listener to the region filter
+            document.getElementById("region_code").addEventListener("change", function() {
+                const selectedRegion = this.value;
+                let filteredData = data;
+                if (selectedRegion !== "all") {
+                    filteredData = data.filter(d => d.region_code === selectedRegion);  // Corrected to region_code
+                }
+                chart.update(filteredData);
+            });
+
+        });
+
+        function zoomed(event) {
+            // Update the X and Y axes with zoom behavior
+            const transform = event.transform;
+            const newX = transform.rescaleX(x);
+            const newY = transform.rescaleY(y);
+
+            svg.selectAll(".x-axis").call(d3.axisBottom(newX));
+            svg.selectAll(".y-axis").call(d3.axisLeft(newY));
+
+            // Update the circles based on zoom
+            svg.selectAll("circle")
+                .attr("cx", d => newX(new Date(d.year, 0, 1)))
+                .attr("cy", d => newY(d.completion_rate))
+                .attr("r", d => radius(d.completion_rate));
+        }
+    </script>
+</body>
+</html>

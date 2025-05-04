@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geographic Map Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/topojson@3"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        .tooltip {
+            position: absolute;
+            background-color: white;
+            border: 1px solid black;
+            padding: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+        }
+        svg {
+            font-family: Arial, sans-serif;
+            width: 100%;
+            height: auto;
+        }
+        .pin {
+            stroke: black;
+            stroke-width: 0.5;
+        }
+        .filters {
+            margin: 20px;
+        }
+        .legend {
+            font-size: 14px;
+        }
+
+        /* Media Query for Smaller Screens */
+        @media (max-width: 768px) {
+            svg {
+                height: 400px; /* Adjust height for smaller screens */
+            }
+            .filters {
+                margin: 10px;
+                font-size: 12px;
+            }
+            .tooltip {
+                font-size: 10px;
+                padding: 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Geographic Map Chart</h1>
+    <div class="filters">
+        <label for="regionFilter">Filter by Region:</label>
+        <select id="regionFilter">
+            <option value="All">All</option>
+        </select>
+
+        <label for="sortBy">Sort by:</label>
+        <select id="sortBy">
+            <option value="completion_rate">Completion Rate</option>
+            <option value="failure_rate">Failure Rate</option>
+        </select>
+
+        <label for="sortOrder">Order:</label>
+        <select id="sortOrder">
+            <option value="asc">Ascending</option>
+            <option value="desc">Descending</option>
+        </select>
+    </div>
+
+    <button id="exportBtn">Export Map as Image</button>
+
+    <div id="tooltip" class="tooltip"></div>
+    <svg></svg>
+
+    <script>
+        const svg = d3.select("svg");
+        let width = svg.node().getBoundingClientRect().width; // Get the width dynamically
+        let height = width * 0.6; // Maintain aspect ratio
+        svg.attr("width", width).attr("height", height);
+
+        const tooltip = d3.select("#tooltip");
+
+        const projection = d3.geoMercator()
+            .scale(150)
+            .translate([width / 2, height / 2]);
+
+        const path = d3.geoPath().projection(projection);
+
+        const regionFilter = d3.select("#regionFilter");
+        const sortBy = d3.select("#sortBy");
+        const sortOrder = d3.select("#sortOrder");
+
+        // Load GeoJSON and dataset
+        Promise.all([
+            d3.json("https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson"),
+            d3.csv("processed_data.csv")
+        ]).then(([geoData, rawData]) => {
+            // Parse dataset and aggregate metrics
+            rawData.forEach(d => {
+                d.new_sp_coh = +d.new_sp_coh || 0;
+                d.completion_rate = +d.completion_rate || 0;
+                d.failure_rate = +d.failure_rate || 0;
+            });
+
+            // Populate region filter
+            const regions = Array.from(new Set(rawData.map(d => d.region_code)));
+            regions.forEach(region => {
+                regionFilter.append("option").text(region).attr("value", region);
+            });
+
+            // Aggregate data by country
+            const aggregatedData = Array.from(
+                d3.group(rawData, d => d.country),
+                ([country, values]) => ({
+                    country,
+                    region: values[0].region_code,
+                    completion_rate: d3.mean(values, d => d.completion_rate),
+                    failure_rate: d3.mean(values, d => d.failure_rate)
+                })
+            );
+
+            // Map GeoJSON countries to their centroids
+            const countryCentroids = new Map();
+            geoData.features.forEach(d => {
+                const centroid = path.centroid(d);
+                countryCentroids.set(d.properties.name, centroid);
+            });
+
+            // Draw the map
+            svg.selectAll("path")
+                .data(geoData.features)
+                .join("path")
+                .attr("d", path)
+                .attr("fill", "#e0e0e0")
+                .attr("stroke", "#b0b0b0");
+
+            // Color scale for pins based on completion rate
+            const color = d3.scaleSequential(d3.interpolateBlues)
+                .domain([0, d3.max(aggregatedData, d => d.completion_rate)]);
+
+            // Function to update map based on filters and sorting
+            function updateMap() {
+                const selectedRegion = regionFilter.property("value");
+                const selectedSortBy = sortBy.property("value");
+                const selectedSortOrder = sortOrder.property("value");
+
+                // Filter data by region
+                let filteredData = aggregatedData.filter(d => {
+                    return selectedRegion === "All" || d.region === selectedRegion;
+                });
+
+                // Sort data by selected metric
+                filteredData.sort((a, b) => {
+                    const valA = a[selectedSortBy];
+                    const valB = b[selectedSortBy];
+                    return selectedSortOrder === "asc" ? valA - valB : valB - valA;
+                });
+
+                // Update pins
+                const pins = svg.selectAll(".pin")
+                    .data(filteredData, d => d.country);
+
+                pins.enter()
+                    .append("circle")
+                    .attr("class", "pin")
+                    .attr("r", 5)
+                    .attr("fill", d => color(d.completion_rate))
+                    .attr("cx", d => {
+                        const location = countryCentroids.get(d.country);
+                        return location ? location[0] : null;
+                    })
+                    .attr("cy", d => {
+                        const location = countryCentroids.get(d.country);
+                        return location ? location[1] : null;
+                    })
+                    .on("mouseover", (event, d) => {
+                        tooltip.style("opacity", 1)
+                            .style("left", `${event.pageX + 10}px`)
+                            .style("top", `${event.pageY + 10}px`)
+                            .html(
+                                `<strong>Country:</strong> ${d.country}<br>
+                                <strong>Region:</strong> ${d.region}<br>
+                                <strong>Completion Rate:</strong> ${d.completion_rate.toFixed(2)}%<br>
+                                <strong>Failure Rate:</strong> ${d.failure_rate.toFixed(2)}%`
+                            );
+                    })
+                    .on("mouseout", () => {
+                        tooltip.style("opacity", 0);
+                    })
+                    .on("click", (event, d) => {
+                        // Highlight related entities
+                        highlightRelatedEntities(d);
+                    });
+
+                pins.exit().remove();
+            }
+
+            // Function to highlight related entities
+            function highlightRelatedEntities(selectedEntity) {
+                // Reset all pins to their original colors
+                svg.selectAll(".pin")
+                    .attr("fill", d => color(d.completion_rate));
+
+                // Determine related entities
+                const relatedEntities = aggregatedData.filter(d => 
+                    d.region === selectedEntity.region // Example: Same region
+                    // Add additional criteria for related entities if needed
+                );
+
+                // Highlight related entities
+                svg.selectAll(".pin")
+                    .filter(d => relatedEntities.some(e => e.country === d.country))
+                    .attr("fill", "lightorange");
+
+                // Optionally, log the related entities for debugging
+                console.log(`Selected country: ${selectedEntity.country}`);
+                console.log("Related entities:", relatedEntities);
+            }
+
+            // Initial render
+            updateMap();
+
+            // Add filter and sorting event listeners
+            regionFilter.on("change", updateMap);
+            sortBy.on("change", updateMap);
+            sortOrder.on("change", updateMap);
+
+            // Add zoom and pan functionality
+            const zoom = d3.zoom()
+                .scaleExtent([1, 8])
+                .on("zoom", (event) => {
+                    svg.selectAll("path").attr("transform", event.transform);
+                    svg.selectAll(".pin").attr("transform", event.transform);
+                });
+
+            svg.call(zoom);
+
+            // Add the legend for the completion rate
+            const legendWidth = 200;
+            const legendHeight = 20;
+            const legendMargin = 10;
+
+            // Create gradient legend scale
+            const legendScale = d3.scaleSequential(d3.interpolateBlues)
+                .domain([0, d3.max(aggregatedData, d => d.completion_rate)]);
+
+            // Create legend
+            const legend = svg.append("g")
+                .attr("class", "legend")
+                .attr("transform", `translate(${width - legendWidth - legendMargin}, 20)`);
+
+            // Create the color bar
+            legend.append("rect")
+                .attr("width", legendWidth)
+                .attr("height", legendHeight)
+                .style("fill", "url(#gradient)");
+
+            // Add gradient to legend
+            svg.append("defs")
+                .append("linearGradient")
+                .attr("id", "gradient")
+                .attr("x1", "0%")
+                .attr("x2", "100%")
+                .selectAll("stop")
+                .data(legendScale.range().map((d, i, arr) => ({
+                    offset: `${(i / (arr.length - 1)) * 100}%`,
+                    color: d
+                })))
+                .enter()
+                .append("stop")
+                .attr("offset", d => d.offset)
+                .attr("stop-color", d => d.color);
+
+            // Add text to the legend
+            const legendAxis = d3.axisBottom(legendScale)
+                .ticks(5)
+                .tickSize(10)
+                .tickFormat(d3.format(".0%"));
+
+            legend.append("g")
+                .attr("transform", `translate(0, ${legendHeight})`)
+                .call(legendAxis);
+        });
+
+        // Function to export map as image
+        const exportBtn = document.getElementById("exportBtn");
+        exportBtn.addEventListener("click", () => {
+            const svgElement = document.querySelector("svg");
+            const svgString = new XMLSerializer().serializeToString(svgElement);
+
+            const canvas = document.createElement("canvas");
+            const ctx = canvas.getContext("2d");
+
+            const img = new Image();
+            const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(url);
+
+                // Download the image
+                const link = document.createElement("a");
+                link.download = "geographic_map_chart.png";
+                link.href = canvas.toDataURL("image/png");
+                link.click();
+            };
+
+            img.src = url;
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hierarchical Tree Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        .tooltip {
+            position: absolute;
+            background-color: white;
+            border: 1px solid black;
+            padding: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+        }
+        svg {
+            font-family: Arial, sans-serif;
+        }
+        text {
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hierarchical Tree Map</h1>
+    <div id="tooltip" class="tooltip"></div>
+    <svg width="1000" height="1000"></svg>
+
+    <script>
+        const width = 2000;
+        const height = 2000;
+        const svg = d3.select("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        const tooltip = d3.select("#tooltip");
+
+        d3.csv("processed_data.csv").then(data => {
+            // Log raw data for debugging
+            console.log("Raw Data:", data);
+
+            // Ensure numeric fields are properly parsed
+            data.forEach(d => {
+                d.new_sp_coh = +d.new_sp_coh || 1; // Default cohort size to 1 if missing/zero
+                d.completion_rate = +d.completion_rate || 0;
+                d.failure_rate = +d.failure_rate || 0;
+            });
+
+            // Roll up data to create a nested hierarchy
+            const nestedData = d3.rollup(
+                data,
+                v => v,
+                d => d.region_code, // Group by region
+                d => d.country      // Group by country within region
+            );
+
+            console.log("Nested Data:", nestedData);
+
+            // Convert nested data into a hierarchical format
+            const hierarchyData = {
+                name: "root",
+                children: Array.from(nestedData, ([region, countries]) => ({
+                    name: region,
+                    children: Array.from(countries, ([country, values]) => ({
+                        name: country,
+                        value: d3.sum(values, d => d.new_sp_coh), // Sum of new_sp_coh
+                        completion_rate: d3.mean(values, d => d.completion_rate),
+                        failure_rate: d3.mean(values, d => d.failure_rate)
+                    }))
+                }))
+            };
+
+            console.log("Hierarchy Data:", hierarchyData);
+
+            const root = d3.hierarchy(hierarchyData)
+                .sum(d => d.value)
+                .sort((a, b) => b.value - a.value);
+
+            const treemap = d3.treemap()
+                .size([width, height])
+                .padding(1);
+
+            treemap(root);
+
+            const color = d3.scaleSequential(d3.interpolateBlues)
+                .domain([0, d3.max(data, d => d.completion_rate)]);
+
+            const nodes = svg.selectAll("g")
+                .data(root.leaves())
+                .join("g")
+                .attr("transform", d => `translate(${d.x0}, ${d.y0})`);
+
+            nodes.append("rect")
+                .attr("width", d => d.x1 - d.x0)
+                .attr("height", d => d.y1 - d.y0)
+                .attr("fill", d => color(d.data.completion_rate || 0))
+                .attr("stroke", "black")
+                .on("mouseover", (event, d) => {
+                    tooltip.style("opacity", 1)
+                        .style("left", `${event.pageX + 10}px`)
+                        .style("top", `${event.pageY + 10}px`)
+                        .html(`
+                            <strong>Region:</strong> ${d.parent.data.name || "Unknown Region"}<br>
+                            <strong>Country:</strong> ${d.data.name || "Unknown Country"}<br>
+                            <strong>Cohort Size:</strong> ${d.data.value || 0}<br>
+                            <strong>Completion Rate:</strong> ${d.data.completion_rate || 0}<br>
+                            <strong>Failure Rate:</strong> ${d.data.failure_rate || 0}
+                        `);
+                })
+                .on("mouseout", () => {
+                    tooltip.style("opacity", 0);
+                });
+
+            nodes.append("text")
+                .attr("x", 5)
+                .attr("y", 15)
+                .text(d => d.data.name || "Unknown")
+                .attr("font-size", "10px")
+                .attr("fill", "black");
+        }).catch(error => {
+            console.error("Error loading or processing data:", error);
+        });
+    </script>
+</body>
+</html>
